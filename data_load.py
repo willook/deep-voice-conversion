@@ -13,6 +13,22 @@ from audio import read_wav, preemphasis, amp2db
 from hparam import hparam as hp
 from utils import normalize_0_1
 
+class DataFlowForConvert(RNGDataFlow):
+
+    def __init__(self, data_path):
+        self.wav_file = data_path
+        self.batch_size = 1
+
+    def __call__(self, n_prefetch=1, n_thread=1):
+        df = self
+        df = BatchData(df, 1)
+        df = PrefetchData(df, n_prefetch, n_thread)
+        return df
+
+    def get_data2(self):
+        while True:
+            yield get_mfccs_and_spectrogram(self.wav_file, isConverting=True, trim=False)
+        
 
 class DataFlow(RNGDataFlow):
 
@@ -30,24 +46,33 @@ class DataFlow(RNGDataFlow):
 class Net1DataFlow(DataFlow):
 
     def get_data(self):
+
         while True:
             wav_file = random.choice(self.wav_files)
-            yield get_mfccs_and_phones(wav_file=wav_file)
+            npz_file = wav_file.replace("WAV","npz")
+            #print(wav_file)
+            yield read_mfccs_and_phones(npz_file)
 
 
 class Net2DataFlow(DataFlow):
 
+    def __init__(self, data_path, batch_size):
+        self.batch_size = batch_size
+        npz_path = data_path + '/npz/*.npz'
+        self.npz_files = glob.glob(npz_path)
+
     def get_data(self):
         while True:
-            wav_file = random.choice(self.wav_files)
-            yield get_mfccs_and_spectrogram(wav_file)
+            npz_file = random.choice(self.npz_files)
+            #print(npz_file)
+            yield read_mfccs_and_spectrogram(npz_file)
 
-
+"""
 def load_data(mode):
     wav_files = glob.glob(getattr(hp, mode).data_path)
 
     return wav_files
-
+"""
 
 def wav_random_crop(wav, sr, duration):
     assert (wav.ndim <= 2)
@@ -61,7 +86,6 @@ def wav_random_crop(wav, sr, duration):
     else:
         wav = wav[:, start:end]
     return wav
-
 
 def get_mfccs_and_phones(wav_file, trim=False, random_crop=True):
 
@@ -79,7 +103,7 @@ def get_mfccs_and_phones(wav_file, trim=False, random_crop=True):
     num_timesteps = mfccs.shape[0]
 
     # phones (targets)
-    phn_file = wav_file.replace("WAV.wav", "PHN").replace("wav", "PHN")
+    phn_file = wav_file.replace("WAV", "PHN")
     phn2idx, idx2phn = load_vocab()
     phns = np.zeros(shape=(num_timesteps,))
     bnd_list = []
@@ -111,8 +135,18 @@ def get_mfccs_and_phones(wav_file, trim=False, random_crop=True):
 
     return mfccs, phns
 
+def read_mfccs_and_phones(npz_file):
+    np_arrays = np.load(npz_file)
 
-def get_mfccs_and_spectrogram(wav_file, trim=True, random_crop=False):
+    mfccs = np_arrays['mfccs']
+    phns = np_arrays['phns']
+
+    np_arrays.close()
+
+    return mfccs, phns
+
+
+def get_mfccs_and_spectrogram(wav_file, trim=True, random_crop=False, isConverting=False):
     '''This is applied in `train2`, `test2` or `convert` phase.
     '''
 
@@ -127,9 +161,11 @@ def get_mfccs_and_spectrogram(wav_file, trim=True, random_crop=False):
     if random_crop:
         wav = wav_random_crop(wav, hp.default.sr, hp.default.duration)
 
-    # Padding or crop
-    length = hp.default.sr * hp.default.duration
-    wav = librosa.util.fix_length(wav, length)
+    
+    # Padding or crop if not Converting
+    if isConverting is False:
+        length = int(hp.default.sr * hp.default.duration)
+        wav = librosa.util.fix_length(wav, length)
 
     return _get_mfcc_and_spec(wav, hp.default.preemphasis, hp.default.n_fft, hp.default.win_length, hp.default.hop_length)
 
@@ -158,6 +194,19 @@ def _get_mfcc_and_spec(wav, preemphasis_coeff, n_fft, win_length, hop_length):
     mel_db = normalize_0_1(mel_db, hp.default.max_db, hp.default.min_db)
 
     return mfccs.T, mag_db.T, mel_db.T  # (t, n_mfccs), (t, 1+n_fft/2), (t, n_mels)
+
+
+def read_mfccs_and_spectrogram(npz_file):
+    np_arrays = np.load(npz_file)
+
+    mfccs = np_arrays['mfccs']
+    mag_db = np_arrays['mag_db']
+    mel_db = np_arrays['mel_db']
+
+    np_arrays.close()
+
+    return mfccs, mag_db, mel_db
+    
 
 
 phns = ['h#', 'aa', 'ae', 'ah', 'ao', 'aw', 'ax', 'ax-h', 'axr', 'ay', 'b', 'bcl',
