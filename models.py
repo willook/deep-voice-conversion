@@ -48,16 +48,17 @@ class Net1(ModelDesc):
 
     @auto_reuse_variable_scope
     def network(self, x_mfcc, is_training):
+
         # Pre-net
         prenet_out = prenet(x_mfcc,
-                            num_units=[hp.train1.hidden_units, hp.train1.hidden_units // 2],
+                            num_units=[hp.train1.hidden_units //4, hp.train1.hidden_units // 2],
                             dropout_rate=hp.train1.dropout_rate,
                             is_training=is_training)  # (N, T, E/2)
 
         # CBHG
         out = cbhg(prenet_out, hp.train1.num_banks, hp.train1.hidden_units // 2,
                    hp.train1.num_highway_blocks, hp.train1.norm_type, is_training)
-
+        
         # Final linear projection
         logits = tf.layers.dense(out, len(phns))  # (N, T, V)
         ppgs = tf.nn.softmax(logits / hp.train1.t, name='ppgs')  # (N, T, V)
@@ -85,7 +86,13 @@ class Net2(ModelDesc):
 
     def _get_inputs(self):
         n_timesteps = (hp.default.duration * hp.default.sr) // hp.default.hop_length + 1
+        # timestep의 갯수, 전체 길이를 hop length 만큼 나눈 것.
+        # STFT 변환 시, 전체 오디오에서 생성되는 총 window 개수와 동일
 
+        # 그래프에 입력하는 entry point에 관한 메타데이터를 생성한다.
+        # 이러한 메타데이터는 나중에 placeholder을 만들거나
+        # 다른 타입의 입력값을 만드는데 쓰일 수 있다.
+        # placeholder : 데이터의 형태만 지정한 뒤, 실제 입력은 실행 단계에서 받을 수 있는 텐서를 뜻한다.
         return [InputDesc(tf.float32, (None, n_timesteps, hp.default.n_mfcc), 'x_mfccs'),
                 InputDesc(tf.float32, (None, n_timesteps, hp.default.n_fft // 2 + 1), 'y_spec'),
                 InputDesc(tf.float32, (None, n_timesteps, hp.default.n_mels), 'y_mel'), ]
@@ -96,12 +103,15 @@ class Net2(ModelDesc):
         is_training = get_current_tower_context().is_training
 
         # build net1
+        # train1에서 학습된 SI-ASR 모델에서 PPGs 추출.
+        # 목표 음성에서 추출된 MFCC를 입력해 해당 MFCC에 대한 PPG들을 뽑아낸다.
         self.net1 = Net1()
         with tf.variable_scope('net1'):
             self.ppgs, _, _ = self.net1.network(self.x_mfcc, is_training)
         self.ppgs = tf.identity(self.ppgs, name='ppgs')
 
         # build net2
+        # net1을 통과시켜 얻은 PPGs를 이용해 스펙트로그램과 mel-스펙트로그램을 예측한다.
         with tf.variable_scope('net2'):
             self.pred_spec, self.pred_mel = self.network(self.ppgs, is_training)
         self.pred_spec = tf.identity(self.pred_spec, name='pred_spec')
@@ -130,12 +140,14 @@ class Net2(ModelDesc):
     @auto_reuse_variable_scope
     def network(self, ppgs, is_training):
         # Pre-net
+        # Net1에서 예측한 PPGs를 pre-network에 삽입하여 prenet_out을 얻는다.
         prenet_out = prenet(ppgs,
                             num_units=[hp.train2.hidden_units, hp.train2.hidden_units // 2],
                             dropout_rate=hp.train2.dropout_rate,
                             is_training=is_training)  # (N, T, E/2)
 
         # CBHG1: mel-scale
+        # prenet_out을 CBHG에 넣어
         pred_mel = cbhg(prenet_out, hp.train2.num_banks, hp.train2.hidden_units // 2,
                         hp.train2.num_highway_blocks, hp.train2.norm_type, is_training,
                         scope="cbhg_mel")
@@ -150,7 +162,18 @@ class Net2(ModelDesc):
         return pred_spec, pred_mel
 
     def loss(self):
+        # 목표 음성에서 얻은 스펙트로그램, mel-스펙트로그램과
+        # 예측을 통해 얻은 스펙트로그램, mel-스펙트로그램을 서로 비교하여 loss를 계산
         loss_spec = tf.reduce_mean(tf.squared_difference(self.pred_spec, self.y_spec))
         loss_mel = tf.reduce_mean(tf.squared_difference(self.pred_mel, self.y_mel))
         loss = loss_spec + loss_mel
         return loss
+
+
+class Net2ForConvert(Net2):
+
+    def _get_inputs(self):
+
+        return [InputDesc(tf.float32, (None, None, hp.default.n_mfcc), 'x_mfccs'),
+                InputDesc(tf.float32, (None, None, hp.default.n_fft // 2 + 1), 'y_spec'),
+                InputDesc(tf.float32, (None, None, hp.default.n_mels), 'y_mel'), ]
