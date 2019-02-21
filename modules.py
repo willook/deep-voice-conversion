@@ -308,7 +308,7 @@ def cbhg(input, num_banks, hidden_units, num_highway_blocks, norm_type='bn', is_
                            num_units=hidden_units,
                            norm_type=norm_type,
                            is_training=is_training)  # (N, T, K * E / 2)
-
+        
         out = tf.layers.max_pooling1d(out, 2, 1, padding="same")  # (N, T, K * E / 2)
 
         out = conv1d(out, hidden_units, 3, scope="conv1d_1")  # (N, T, E/2)
